@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { I18nContext } from 'nestjs-i18n';
 import { Garment } from '../dal/entity/garment.entity';
+import { Outfit } from '../dal/entity/outfit.entity';
 import { File } from '../dal/entity/file.entity';
 import { User } from '../dal/entity/user.entity';
 import { OutfitCalendar } from '../dal/entity/outfit-calendar.entity';
@@ -19,6 +20,7 @@ import { UpdateGarmentDto } from './dto/update-garment.dto';
 import { SearchGarmentDto } from './dto/search-garment.dto';
 import { GarmentCategory, compareCategories } from './garment-category.enum';
 import { WardrobeShareService } from '../wardrobe-share/wardrobe-share.service';
+import { orderOutfitGarments } from './outfit.service';
 import {
   normalizeSubCategory,
   compareSubCategories,
@@ -44,6 +46,8 @@ export class GarmentService {
   constructor(
     @InjectRepository(Garment)
     private readonly garmentRepository: EntityRepository<Garment>,
+    @InjectRepository(Outfit)
+    private readonly outfitRepository: EntityRepository<Outfit>,
     @InjectRepository(User)
     private readonly userRepository: EntityRepository<User>,
     @InjectRepository(OutfitCalendar)
@@ -77,6 +81,9 @@ export class GarmentService {
       ...(dto.archived !== 'true' ? { archived: false } : {}),
       ...(dto.season ? { seasons: { $like: `%${dto.season}%` } } : {}),
       ...(dto.occasion ? { occasions: { $like: `%${dto.occasion}%` } } : {}),
+      ...(dto.looks || dto.look
+        ? { looks: { $like: `%${dto.looks ?? dto.look}%` } }
+        : {}),
       ...(parsedRating != null ? { rating: { $gte: parsedRating } } : {}),
       ...(dto.keyword
         ? {
@@ -85,7 +92,7 @@ export class GarmentService {
               { notes: { $like: `%${dto.keyword}%` } },
               { brand: { $like: `%${dto.keyword}%` } },
               { print: { $like: `%${dto.keyword}%` } },
-              { look: { $like: `%${dto.keyword}%` } },
+              { looks: { $like: `%${dto.keyword}%` } },
               { subCategory: { $like: `%${dto.keyword}%` } },
             ],
           }
@@ -345,9 +352,10 @@ export class GarmentService {
           if (res !== 0) return res;
           return (g2.id ?? 0) - (g1.id ?? 0);
 
+        case 'looks':
         case 'look':
-          // 1. look, 2. category, 3. name, 4. id
-          res = compareStrings(g1.look, g2.look, dir);
+          // 1. looks, 2. category, 3. name, 4. id
+          res = compareStrings(g1.looks ?? g1.look, g2.looks ?? g2.look, dir);
           if (res !== 0) return res;
           res = compareCategories(g1.category, g2.category, dir);
           if (res !== 0) return res;
@@ -436,7 +444,8 @@ export class GarmentService {
       purchaseLink: dto.purchaseLink,
       cost: dto.cost,
       print: dto.print ?? dto.pattern,
-      look: dto.look ?? dto.style,
+      looks: dto.looks ?? dto.look ?? dto.style,
+      look: dto.looks ?? dto.look ?? dto.style,
       fit: dto.fit,
     });
 
@@ -502,7 +511,8 @@ export class GarmentService {
       purchaseLink: dto.purchaseLink ?? source.purchaseLink,
       cost: dto.cost ?? source.cost,
       print: dto.print ?? dto.pattern ?? source.print,
-      look: dto.look ?? dto.style ?? source.look,
+      looks: dto.looks ?? dto.look ?? dto.style ?? source.looks ?? source.look,
+      look: dto.looks ?? dto.look ?? dto.style ?? source.looks ?? source.look,
       fit: dto.fit ?? source.fit,
       photo: photo ?? undefined,
     });
@@ -634,8 +644,16 @@ export class GarmentService {
     if ('cost' in dto) garment.cost = dto.cost;
     if ('print' in dto) garment.print = dto.print;
     else if ('pattern' in dto) garment.print = dto.pattern;
-    if ('look' in dto) garment.look = dto.look;
-    else if ('style' in dto) garment.look = dto.style;
+    if ('looks' in dto) {
+      garment.looks = dto.looks;
+      garment.look = dto.looks;
+    } else if ('look' in dto) {
+      garment.looks = dto.look;
+      garment.look = dto.look;
+    } else if ('style' in dto) {
+      garment.looks = dto.style;
+      garment.look = dto.style;
+    }
     if ('fit' in dto) garment.fit = dto.fit;
 
     await this.garmentRepository.getEntityManager().flush();
@@ -692,6 +710,137 @@ export class GarmentService {
       qb.andWhere({ 'c.owner': null });
     }
     return await qb.getCount();
+  }
+
+  async findGarmentOutfitsWithWearHistory(
+    garmentId: number,
+    userId?: number,
+    viewOwner?: number,
+    sort: 'asc' | 'desc' = 'desc',
+  ): Promise<{
+    garment: Garment;
+    outfits: Array<{
+      id: number;
+      name?: string;
+      rating?: number;
+      notes?: string;
+      look?: string;
+      looks?: string;
+      looksList: string[];
+      occasions?: string;
+      seasons?: string;
+      createdAt?: Date;
+      createdAtStr: string;
+      garments: Garment[];
+      wornDates: Array<{ date: Date; dateStr: string }>;
+      isWorn: boolean;
+    }>;
+  }> {
+    const garment = await this.findOne(garmentId, userId, viewOwner);
+    const effectiveOwnerId = viewOwner ?? userId;
+
+    const where: FilterQuery<Outfit> = {
+      garments: { id: garment.id },
+      ...(effectiveOwnerId != null
+        ? { owner: { id: effectiveOwnerId } }
+        : { owner: null }),
+    };
+
+    const outfits = await this.outfitRepository.find(where, {
+      populate: ['garments', 'garments.photo'],
+    });
+
+    outfits.sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (timeA !== timeB) {
+        return sort === 'asc' ? timeA - timeB : timeB - timeA;
+      }
+      return sort === 'asc' ? a.id - b.id : b.id - a.id;
+    });
+
+    const wornDatesByOutfitId = new Map<
+      number,
+      Array<{ date: Date; dateStr: string }>
+    >();
+
+    if (outfits.length > 0) {
+      const outfitIds = outfits.map((o) => o.id);
+      const calendarWhere: FilterQuery<OutfitCalendar> = {
+        outfit: { id: { $in: outfitIds } },
+        wornAt: { $ne: null },
+        ...(effectiveOwnerId != null
+          ? { owner: { id: effectiveOwnerId } }
+          : { owner: null }),
+      };
+
+      const entries = await this.calendarRepository.find(calendarWhere, {
+        orderBy: { date: 'desc' },
+      });
+
+      for (const entry of entries) {
+        const oId = entry.outfit.id;
+        if (!wornDatesByOutfitId.has(oId)) {
+          wornDatesByOutfitId.set(oId, []);
+        }
+        const dateStr =
+          entry.date instanceof Date
+            ? entry.date.toISOString().split('T')[0]
+            : String(entry.date).split('T')[0];
+
+        const list = wornDatesByOutfitId.get(oId)!;
+        if (!list.some((item) => item.dateStr === dateStr)) {
+          list.push({ date: entry.date, dateStr });
+        }
+      }
+    }
+
+    const outfitItems = outfits.map((outfit) => {
+      const orderedGarments = orderOutfitGarments(outfit);
+      const wornDates = wornDatesByOutfitId.get(outfit.id) ?? [];
+      const isWorn = wornDates.length > 0;
+      const createdAtDate = outfit.createdAt ?? new Date();
+      const createdAtStr =
+        createdAtDate instanceof Date
+          ? createdAtDate.toISOString().split('T')[0]
+          : String(createdAtDate).split('T')[0];
+
+      return {
+        id: outfit.id,
+        name: outfit.name,
+        rating: outfit.rating,
+        notes: outfit.notes,
+        look: outfit.looks ?? outfit.look,
+        looks: outfit.looks ?? outfit.look,
+        looksList:
+          (outfit.looks ?? outfit.look)
+            ?.split(',')
+            .map((l) => l.trim())
+            .filter(Boolean) ?? [],
+        occasions: outfit.occasions,
+        occasionsList:
+          outfit.occasions
+            ?.split(',')
+            .map((o) => o.trim())
+            .filter(Boolean) ?? [],
+        seasons: outfit.seasons,
+        seasonsList:
+          outfit.seasons
+            ?.split(',')
+            .map((s) => s.trim())
+            .filter(Boolean) ?? [],
+        createdAt: outfit.createdAt,
+        createdAtStr,
+        garments: orderedGarments,
+        wornDates,
+        isWorn,
+      };
+    });
+
+    return {
+      garment,
+      outfits: outfitItems,
+    };
   }
 
   async remove(id: number, userId?: number): Promise<void> {

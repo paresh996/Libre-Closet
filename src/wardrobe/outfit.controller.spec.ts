@@ -35,6 +35,7 @@ describe('OutfitController', () => {
       create: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
+      parseSlotsFromBody: jest.fn().mockReturnValue([]),
       buildCategoryRows: jest.fn().mockReturnValue([]),
       buildRow: jest.fn(),
       getOrderedGarments: jest.fn((outfit) =>
@@ -146,7 +147,75 @@ describe('OutfitController', () => {
       expect(result).toEqual({
         outfit: dummyOutfit,
         garments: [{ id: 10, name: 'Shirt' }],
+        looksList: [],
+        seasonsList: [],
+        occasionsList: [],
       });
+    });
+  });
+
+  describe('create and update with metadata', () => {
+    it('creates an outfit parsing looks, occasions, and seasons arrays', async () => {
+      const mockReq: any = { user: { userId: 5 } };
+      mockOutfitService.create.mockResolvedValueOnce({ id: 99 });
+
+      await controller.create(
+        {
+          name: 'Weekend Trip',
+          notes: 'Sunny and breezy',
+          rating: '4',
+          looks: ['Casual', 'Classic'],
+          occasions: ['Work', 'Everyday'],
+          seasons: ['Spring', 'Summer'],
+          category: ['tops'],
+          garmentId: ['1'],
+        },
+        mockReq,
+        mockReply,
+      );
+
+      expect(mockOutfitService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'Weekend Trip',
+          rating: 4,
+          looks: 'Casual,Classic',
+          occasions: 'Work,Everyday',
+          seasons: 'Spring,Summer',
+        }),
+        5,
+      );
+      expect(mockReply.redirect).toHaveBeenCalledWith('/outfits/99', 302);
+    });
+
+    it('updates an outfit parsing looks array, occasions, and seasons', async () => {
+      const mockReq: any = { user: { userId: 5 } };
+      mockOutfitService.update.mockResolvedValueOnce({ id: 99 });
+
+      await controller.update(
+        99,
+        {
+          name: 'Weekend Trip Updated',
+          looks: ['Formal', 'Business'],
+          occasions: 'Date,Special',
+          seasons: 'Autumn',
+          category: ['tops'],
+          garmentId: ['1'],
+        },
+        mockReq,
+        mockReply,
+      );
+
+      expect(mockOutfitService.update).toHaveBeenCalledWith(
+        99,
+        expect.objectContaining({
+          name: 'Weekend Trip Updated',
+          looks: 'Formal,Business',
+          occasions: 'Date,Special',
+          seasons: 'Autumn',
+        }),
+        5,
+      );
+      expect(mockReply.redirect).toHaveBeenCalledWith('/outfits/99', 302);
     });
   });
 
